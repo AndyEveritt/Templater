@@ -13,7 +13,12 @@ import {
 } from "obsidian";
 import { TemplaterError } from "utils/Error";
 import { ModuleName } from "editor/TpDocumentation";
-import { get_frontmatter_and_content, is_object } from "utils/Utils";
+import { RunningConfig } from "core/Templater";
+import {
+    get_frontmatter_and_content,
+    is_object,
+    merge_objects,
+} from "utils/Utils";
 
 export const DEPTH_LIMIT = 10;
 
@@ -37,7 +42,6 @@ export class InternalModuleFile extends InternalModule {
         this.static_functions.set("exists", this.generate_exists());
         this.static_functions.set("find_tfile", this.generate_find_tfile());
         this.static_functions.set("folder", this.generate_folder());
-        this.static_functions.set("include", this.generate_include());
         this.static_functions.set(
             "last_modified_date",
             this.generate_last_modified_date()
@@ -55,6 +59,15 @@ export class InternalModuleFile extends InternalModule {
     }
 
     async teardown(): Promise<void> {}
+
+    async generate_object(
+        new_config: RunningConfig
+    ): Promise<Record<string, unknown>> {
+        const object = await super.generate_object(new_config);
+        // Created per run, so includes are tied to the run they were called from
+        object.include = this.generate_include(new_config);
+        return object;
+    }
 
     async generate_content(): Promise<string> {
         return await this.plugin.app.vault.read(this.config.target_file);
@@ -156,8 +169,16 @@ export class InternalModuleFile extends InternalModule {
         };
     }
 
-    generate_include(): (include_link: string | TFile) => Promise<string> {
-        return async (include_link: string | TFile) => {
+    generate_include(
+        config: RunningConfig
+    ): (
+        include_link: string | TFile,
+        merge_frontmatter?: boolean
+    ) => Promise<string> {
+        return async (
+            include_link: string | TFile,
+            merge_frontmatter = true
+        ) => {
             // TODO: Add mutex for this, this may currently lead to a race condition.
             // While not very impactful, that could still be annoying.
             this.include_depth += 1;
@@ -215,22 +236,23 @@ export class InternalModuleFile extends InternalModule {
             }
 
             try {
+                const run = this.plugin.templater.get_template_run(config);
                 const parsed_content =
                     await this.plugin.templater.parser.parse_commands(
                         inc_file_content,
-                        this.plugin.templater.current_functions_object
+                        run?.functions_object ??
+                            this.plugin.templater.current_functions_object
                     );
                 this.include_depth -= 1;
-                if (is_whole_file) {
+                if (run && merge_frontmatter && is_whole_file) {
                     const { frontmatter, content } =
                         get_frontmatter_and_content(parsed_content);
                     if (
                         is_object(frontmatter) &&
-                        Object.keys(frontmatter).length > 0 &&
-                        this.plugin.templater.collect_included_frontmatter(
-                            frontmatter,
-                        )
+                        !Array.isArray(frontmatter) &&
+                        Object.keys(frontmatter).length > 0
                     ) {
+                        merge_objects(run.included_frontmatter, frontmatter);
                         return content;
                     }
                 }

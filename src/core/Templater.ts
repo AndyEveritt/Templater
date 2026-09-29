@@ -4,6 +4,7 @@ import {
     MarkdownPostProcessorContext,
     MarkdownView,
     normalizePath,
+    parseYaml,
     stringifyYaml,
     TAbstractFile,
     TFile,
@@ -45,14 +46,21 @@ export type RunningConfig = {
     active_file?: TFile | null;
 };
 
+export type TemplateRun = {
+    functions_object: Record<string, unknown>;
+    // Frontmatter collected from `tp.file.include` calls, merged into the
+    // template's frontmatter once it has been parsed
+    included_frontmatter: Record<string, unknown>;
+};
+
 export class Templater {
     public parser: Parser;
     public functions_generator: FunctionsGenerator;
     public current_functions_object: Record<string, unknown>;
     public files_with_pending_templates: Set<string>;
-    // Frontmatter collected from `tp.file.include` calls, one entry per
-    // `parse_template` call currently running (nested runs push their own)
-    private included_frontmatter_stack: Array<Record<string, unknown>> = [];
+    // Keyed by config, which is unique per run, so overlapping runs (e.g.
+    // while a prompt is open, or `tp.file.create_new`) keep their own state
+    private template_runs: WeakMap<RunningConfig, TemplateRun> = new WeakMap();
 
     constructor(private plugin: TemplaterPlugin) {
         this.functions_generator = new FunctionsGenerator(this.plugin);
@@ -101,11 +109,9 @@ export class Templater {
             config,
             FunctionsMode.USER_INTERNAL,
         );
-        const previous_functions_object = this.current_functions_object;
-        const is_nested = this.included_frontmatter_stack.length > 0;
-        const included_frontmatter: Record<string, unknown> = {};
         this.current_functions_object = functions_object;
-        this.included_frontmatter_stack.push(included_frontmatter);
+        const run: TemplateRun = { functions_object, included_frontmatter: {} };
+        this.template_runs.set(config, run);
         let content: string;
         try {
             content = await this.parser.parse_commands(
@@ -113,32 +119,20 @@ export class Templater {
                 functions_object,
             );
         } finally {
-            this.included_frontmatter_stack.pop();
-            // Restore the parent template's functions after a nested run
-            // (e.g. `tp.file.create_new` inside a template). Top level runs
-            // leave it set, as external scripts rely on it after a run.
-            if (is_nested) {
-                this.current_functions_object = previous_functions_object;
-            }
+            this.template_runs.delete(config);
         }
-        return this.merge_included_frontmatter(content, included_frontmatter);
+        return this.merge_included_frontmatter(
+            content,
+            run.included_frontmatter,
+        );
     }
 
     /**
-     * Collects frontmatter from an included file so it can be merged into the
-     * frontmatter of the template currently being parsed.
-     * @returns false if no template is being parsed, in which case the
-     * frontmatter should be left in the included content.
+     * @returns the `parse_template` run using `config`, or undefined if it
+     * isn't running (e.g. for dynamic commands)
      */
-    collect_included_frontmatter(
-        frontmatter: Record<string, unknown>,
-    ): boolean {
-        const stack = this.included_frontmatter_stack;
-        if (stack.length === 0) {
-            return false;
-        }
-        merge_objects(stack[stack.length - 1], frontmatter);
-        return true;
+    get_template_run(config: RunningConfig): TemplateRun | undefined {
+        return this.template_runs.get(config);
     }
 
     private merge_included_frontmatter(
@@ -149,12 +143,53 @@ export class Templater {
             return content;
         }
         // Merge after parsing so commands in the template's own frontmatter
-        // have been resolved, and included values take precedence
-        const { frontmatter, content: body } =
-            get_frontmatter_and_content(content);
-        const merged = is_object(frontmatter) ? frontmatter : {};
-        merge_objects(merged, included_frontmatter);
-        return `---\n${stringifyYaml(merged)}---\n${body}`;
+        // have been resolved. Commands before the frontmatter can leave
+        // whitespace in front of it, which is dropped to keep it valid.
+        const offset = content.length - content.trimStart().length;
+        const info = getFrontMatterInfo(content.slice(offset));
+        if (info.exists) {
+            let frontmatter: unknown;
+            try {
+                frontmatter = parseYaml(info.frontmatter) ?? {};
+            } catch {
+                frontmatter = undefined;
+            }
+            if (is_object(frontmatter) && !Array.isArray(frontmatter)) {
+                const body = content.slice(offset + info.contentStart);
+                return `---\n${this.merge_frontmatter_yaml(
+                    info.frontmatter,
+                    frontmatter,
+                    included_frontmatter,
+                )}---\n${body}`;
+            }
+            if (offset === 0) {
+                log_error(
+                    new TemplaterError(
+                        "Couldn't merge included frontmatter, the template's frontmatter isn't a valid YAML mapping.",
+                    ),
+                );
+                return content;
+            }
+        }
+        return `---\n${stringifyYaml(included_frontmatter)}---\n${content}`;
+    }
+
+    private merge_frontmatter_yaml(
+        yaml: string,
+        frontmatter: Record<string, unknown>,
+        included_frontmatter: Record<string, unknown>,
+    ): string {
+        const has_shared_keys = Object.keys(included_frontmatter).some((key) =>
+            Object.prototype.hasOwnProperty.call(frontmatter, key),
+        );
+        if (has_shared_keys) {
+            // Values have to be merged, so the frontmatter is rewritten
+            merge_objects(frontmatter, included_frontmatter);
+            return stringifyYaml(frontmatter);
+        }
+        // Only new keys, append them to keep the template's formatting
+        const separator = yaml === "" || yaml.endsWith("\n") ? "" : "\n";
+        return yaml + separator + stringifyYaml(included_frontmatter);
     }
 
     private start_templater_task(path: string) {

@@ -348,15 +348,23 @@ example = "<% tp.file.folder(true) %>"
 [tp.file.functions.include]
 name = "include"
 description = "Includes the file's link content. Templates in the included content will be resolved. When including a whole file, its frontmatter is merged into the frontmatter of the template, with the included values taking precedence."
-definition = "tp.file.include(include_link: string | TFile)"
+definition = "tp.file.include(include_link: string | TFile, merge_frontmatter: boolean = true)"
 
 [[tp.file.functions.include.args]]
 name = "include_link"
 description = """The link to the file to include, e.g. `"[[MyFile]]"`, or a TFile object. Also supports sections or blocks inclusions."""
 
+[[tp.file.functions.include.args]]
+name = "merge_frontmatter"
+description = "Whether to merge the included file's frontmatter into the template's frontmatter. When `false`, the frontmatter is left in the included content. Defaults to `true`."
+
 [[tp.file.functions.include.examples]]
 name = "File include"
 example = """<% await tp.file.include("[[Template1]]") %>"""
+
+[[tp.file.functions.include.examples]]
+name = "File include, keeping its frontmatter in the content"
+example = """<% await tp.file.include("[[Template1]]", false) %>"""
 
 [[tp.file.functions.include.examples]]
 name = "File include TFile"
