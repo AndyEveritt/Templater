@@ -13,7 +13,7 @@ import {
 } from "obsidian";
 import { TemplaterError } from "utils/Error";
 import { ModuleName } from "editor/TpDocumentation";
-import { RunningConfig } from "core/Templater";
+import { FrontmatterCollector } from "core/Templater";
 import {
     get_frontmatter_and_content,
     is_object,
@@ -60,13 +60,22 @@ export class InternalModuleFile extends InternalModule {
 
     async teardown(): Promise<void> {}
 
-    async generate_object(
-        new_config: RunningConfig
-    ): Promise<Record<string, unknown>> {
-        const object = await super.generate_object(new_config);
-        // Created per run, so includes are tied to the run they were called from
-        object.include = this.generate_include(new_config);
-        return object;
+    /**
+     * Adds `tp.file.include` to a functions object, so included content is
+     * parsed with that object. Included frontmatter is added to
+     * `frontmatter_collector` while it's open.
+     */
+    add_include(
+        functions_object: Record<string, unknown>,
+        frontmatter_collector: FrontmatterCollector | null
+    ): void {
+        const file = functions_object[this.name];
+        if (is_object(file)) {
+            file.include = this.generate_include(
+                functions_object,
+                frontmatter_collector
+            );
+        }
     }
 
     async generate_content(): Promise<string> {
@@ -170,7 +179,8 @@ export class InternalModuleFile extends InternalModule {
     }
 
     generate_include(
-        config: RunningConfig
+        functions_object: Record<string, unknown>,
+        frontmatter_collector: FrontmatterCollector | null
     ): (
         include_link: string | TFile,
         merge_frontmatter?: boolean
@@ -235,27 +245,51 @@ export class InternalModuleFile extends InternalModule {
                 }
             }
 
+            // Nested includes collect into their own collector, so they can
+            // be merged into this file's frontmatter first
+            const collector: FrontmatterCollector | null =
+                frontmatter_collector?.open && merge_frontmatter
+                    ? { frontmatter: {}, open: true }
+                    : null;
+            const nested_functions_object = {
+                ...functions_object,
+                [this.name]: { ...(functions_object[this.name] as object) },
+            };
+            this.add_include(nested_functions_object, collector);
+
             try {
-                const run = this.plugin.templater.get_template_run(config);
-                const parsed_content =
-                    await this.plugin.templater.parser.parse_commands(
-                        inc_file_content,
-                        run?.functions_object ??
-                            this.plugin.templater.current_functions_object
-                    );
+                let parsed_content: string;
+                try {
+                    parsed_content =
+                        await this.plugin.templater.parser.parse_commands(
+                            inc_file_content,
+                            nested_functions_object
+                        );
+                } finally {
+                    if (collector) collector.open = false;
+                }
                 this.include_depth -= 1;
-                if (run && merge_frontmatter && is_whole_file) {
-                    const { frontmatter, content } =
+                if (!collector || !frontmatter_collector?.open) {
+                    return parsed_content;
+                }
+                if (is_whole_file) {
+                    const { frontmatter, content, yaml } =
                         get_frontmatter_and_content(parsed_content);
-                    if (
-                        is_object(frontmatter) &&
-                        !Array.isArray(frontmatter) &&
-                        Object.keys(frontmatter).length > 0
-                    ) {
-                        merge_objects(run.included_frontmatter, frontmatter);
+                    if (yaml !== undefined) {
+                        // Included values take precedence, as they do over
+                        // the template
+                        merge_objects(frontmatter, collector.frontmatter);
+                        merge_objects(
+                            frontmatter_collector.frontmatter,
+                            frontmatter
+                        );
                         return content;
                     }
                 }
+                merge_objects(
+                    frontmatter_collector.frontmatter,
+                    collector.frontmatter
+                );
                 return parsed_content;
             } catch (e) {
                 this.include_depth -= 1;

@@ -4,7 +4,6 @@ import {
     MarkdownPostProcessorContext,
     MarkdownView,
     normalizePath,
-    parseYaml,
     stringifyYaml,
     TAbstractFile,
     TFile,
@@ -17,7 +16,7 @@ import {
     get_folder_path_from_file_path,
     resolve_tfile,
     get_frontmatter_and_content,
-    is_object,
+    merge_frontmatter_yaml,
     merge_objects,
 } from "utils/Utils";
 import TemplaterPlugin from "main";
@@ -46,11 +45,11 @@ export type RunningConfig = {
     active_file?: TFile | null;
 };
 
-export type TemplateRun = {
-    functions_object: Record<string, unknown>;
-    // Frontmatter collected from `tp.file.include` calls, merged into the
-    // template's frontmatter once it has been parsed
-    included_frontmatter: Record<string, unknown>;
+// Frontmatter collected from `tp.file.include` calls while content is parsed
+export type FrontmatterCollector = {
+    frontmatter: Record<string, unknown>;
+    // False once parsing has finished, so later includes don't collect
+    open: boolean;
 };
 
 export class Templater {
@@ -58,9 +57,6 @@ export class Templater {
     public functions_generator: FunctionsGenerator;
     public current_functions_object: Record<string, unknown>;
     public files_with_pending_templates: Set<string>;
-    // Keyed by config, which is unique per run, so overlapping runs (e.g.
-    // while a prompt is open, or `tp.file.create_new`) keep their own state
-    private template_runs: WeakMap<RunningConfig, TemplateRun> = new WeakMap();
 
     constructor(private plugin: TemplaterPlugin) {
         this.functions_generator = new FunctionsGenerator(this.plugin);
@@ -105,13 +101,15 @@ export class Templater {
         config: RunningConfig,
         template_content: string,
     ): Promise<string> {
+        // Each run has its own collector, so overlapping runs (e.g. while a
+        // prompt is open, or `tp.file.create_new`) keep their frontmatter apart
+        const collector: FrontmatterCollector = { frontmatter: {}, open: true };
         const functions_object = await this.functions_generator.generate_object(
             config,
             FunctionsMode.USER_INTERNAL,
+            collector,
         );
         this.current_functions_object = functions_object;
-        const run: TemplateRun = { functions_object, included_frontmatter: {} };
-        this.template_runs.set(config, run);
         let content: string;
         try {
             content = await this.parser.parse_commands(
@@ -119,20 +117,9 @@ export class Templater {
                 functions_object,
             );
         } finally {
-            this.template_runs.delete(config);
+            collector.open = false;
         }
-        return this.merge_included_frontmatter(
-            content,
-            run.included_frontmatter,
-        );
-    }
-
-    /**
-     * @returns the `parse_template` run using `config`, or undefined if it
-     * isn't running (e.g. for dynamic commands)
-     */
-    get_template_run(config: RunningConfig): TemplateRun | undefined {
-        return this.template_runs.get(config);
+        return this.merge_included_frontmatter(content, collector.frontmatter);
     }
 
     private merge_included_frontmatter(
@@ -143,53 +130,29 @@ export class Templater {
             return content;
         }
         // Merge after parsing so commands in the template's own frontmatter
-        // have been resolved. Commands before the frontmatter can leave
-        // whitespace in front of it, which is dropped to keep it valid.
-        const offset = content.length - content.trimStart().length;
-        const info = getFrontMatterInfo(content.slice(offset));
-        if (info.exists) {
-            let frontmatter: unknown;
-            try {
-                frontmatter = parseYaml(info.frontmatter) ?? {};
-            } catch {
-                frontmatter = undefined;
-            }
-            if (is_object(frontmatter) && !Array.isArray(frontmatter)) {
-                const body = content.slice(offset + info.contentStart);
-                return `---\n${this.merge_frontmatter_yaml(
-                    info.frontmatter,
-                    frontmatter,
-                    included_frontmatter,
-                )}---\n${body}`;
-            }
-            if (offset === 0) {
-                log_error(
-                    new TemplaterError(
-                        "Couldn't merge included frontmatter, the template's frontmatter isn't a valid YAML mapping.",
-                    ),
-                );
-                return content;
-            }
+        // have been resolved, and included values take precedence
+        const {
+            frontmatter,
+            content: body,
+            yaml,
+            invalid,
+        } = get_frontmatter_and_content(content);
+        if (invalid) {
+            log_error(
+                new TemplaterError(
+                    "Couldn't merge included frontmatter, the template's frontmatter isn't a valid YAML mapping.",
+                ),
+            );
+            return content;
         }
-        return `---\n${stringifyYaml(included_frontmatter)}---\n${content}`;
-    }
-
-    private merge_frontmatter_yaml(
-        yaml: string,
-        frontmatter: Record<string, unknown>,
-        included_frontmatter: Record<string, unknown>,
-    ): string {
-        const has_shared_keys = Object.keys(included_frontmatter).some((key) =>
-            Object.prototype.hasOwnProperty.call(frontmatter, key),
-        );
-        if (has_shared_keys) {
-            // Values have to be merged, so the frontmatter is rewritten
-            merge_objects(frontmatter, included_frontmatter);
-            return stringifyYaml(frontmatter);
+        if (yaml === undefined) {
+            return `---\n${stringifyYaml(included_frontmatter)}---\n${content}`;
         }
-        // Only new keys, append them to keep the template's formatting
-        const separator = yaml === "" || yaml.endsWith("\n") ? "" : "\n";
-        return yaml + separator + stringifyYaml(included_frontmatter);
+        return `---\n${merge_frontmatter_yaml(
+            yaml,
+            frontmatter,
+            included_frontmatter,
+        )}---\n${body}`;
     }
 
     private start_templater_task(path: string) {
