@@ -13,6 +13,7 @@ import {
 } from "obsidian";
 import { TemplaterError } from "utils/Error";
 import { ModuleName } from "editor/TpDocumentation";
+import { get_frontmatter_and_content, is_object } from "utils/Utils";
 
 export const DEPTH_LIMIT = 10;
 
@@ -168,6 +169,7 @@ export class InternalModuleFile extends InternalModule {
             }
 
             let inc_file_content: string;
+            let is_whole_file = true;
 
             if (include_link instanceof TFile) {
                 inc_file_content = await this.plugin.app.vault.read(
@@ -202,6 +204,7 @@ export class InternalModuleFile extends InternalModule {
                     if (cache) {
                         const result = resolveSubpath(cache, subpath);
                         if (result) {
+                            is_whole_file = false;
                             inc_file_content = inc_file_content.slice(
                                 result.start.offset,
                                 result.end?.offset
@@ -218,6 +221,19 @@ export class InternalModuleFile extends InternalModule {
                         this.plugin.templater.current_functions_object
                     );
                 this.include_depth -= 1;
+                if (is_whole_file) {
+                    const { frontmatter, content } =
+                        get_frontmatter_and_content(parsed_content);
+                    if (
+                        is_object(frontmatter) &&
+                        Object.keys(frontmatter).length > 0 &&
+                        this.plugin.templater.collect_included_frontmatter(
+                            frontmatter,
+                        )
+                    ) {
+                        return content;
+                    }
+                }
                 return parsed_content;
             } catch (e) {
                 this.include_depth -= 1;

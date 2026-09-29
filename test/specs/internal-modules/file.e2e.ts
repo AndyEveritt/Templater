@@ -866,6 +866,92 @@ describe("InternalModuleFile", () => {
         );
     });
 
+    it("tp.file.include merges included frontmatter into template frontmatter", async () => {
+        await resetVault("test/vault", {
+            "templates/tp.file.include.md":
+                "---\ntitle: <% tp.file.title %>\ntags:\n  - root\n---\n" +
+                "<% tp.file.include('[[include-source]]') %>",
+            "notes/include-source.md":
+                "---\nstatus: draft\ntags:\n  - included\n---\nIncluded content",
+        });
+        await CreateNewNoteFromTemplateModalPage.open();
+        await CreateNewNoteFromTemplateModalPage.selectSuggestionByName(
+            "tp.file.include",
+        );
+        await WorkspacePage.waitForAllTemplatesExecuted();
+        const content = await obsidianPage.read("Untitled.md");
+        expect(content.match(/^---$/gm)).toHaveLength(2);
+        expect(content).toContain("title: Untitled");
+        expect(content).toContain("status: draft");
+        expect(content).toContain("  - root\n  - included");
+        expect(content).toMatch(/---\nIncluded content$/);
+    });
+
+    it("tp.file.include merges frontmatter of nested includes", async () => {
+        await resetVault("test/vault", {
+            "templates/tp.file.include.md": `<% tp.file.include('[[include-outer]]') %>`,
+            "notes/include-outer.md":
+                "---\nouter: true\n---\nOuter <% tp.file.include('[[include-inner]]') %>",
+            "notes/include-inner.md": "---\ninner: true\n---\nInner",
+        });
+        await CreateNewNoteFromTemplateModalPage.open();
+        await CreateNewNoteFromTemplateModalPage.selectSuggestionByName(
+            "tp.file.include",
+        );
+        await WorkspacePage.waitForAllTemplatesExecuted();
+        const content = await obsidianPage.read("Untitled.md");
+        expect(content.match(/^---$/gm)).toHaveLength(2);
+        expect(content).toContain("outer: true");
+        expect(content).toContain("inner: true");
+        expect(content).toMatch(/---\nOuter Inner$/);
+    });
+
+    it("tp.file.include merges included frontmatter when inserting into active file", async () => {
+        await resetVault("test/vault", {
+            "templates/tp.file.include.md": `Before <% tp.file.include('[[include-source]]') %>`,
+            "notes/include-source.md":
+                "---\nstatus: draft\n---\nIncluded content",
+        });
+        await EmptyStateViewPage.clickCreateNewNote();
+        await WorkspacePage.expectActiveTabToHaveText("Untitled");
+        await OpenInsertTemplateModalPage.open();
+        await OpenInsertTemplateModalPage.selectSuggestionByName(
+            "tp.file.include",
+        );
+        await WorkspacePage.waitForAllTemplatesExecuted();
+        const content = await obsidianPage.read("Untitled.md");
+        expect(content.match(/^---$/gm)).toHaveLength(2);
+        expect(content).toContain("status: draft");
+        expect(content).toMatch(/---\nBefore Included content$/);
+    });
+
+    it("tp.file.include frontmatter merging supports external parse_template callers", async () => {
+        await resetVault("test/vault", {
+            "notes/target.md": "\n",
+            "notes/include-source.md":
+                "---\nstatus: draft\n---\nIncluded content",
+        });
+        const result = await browser.executeObsidian(async ({ app }) => {
+            const plugin = app.plugins.getPlugin("templater-obsidian");
+            if (!plugin) throw new Error("templater-obsidian is not loaded");
+            const target_file = app.vault.getFileByPath("notes/target.md");
+            if (!target_file) throw new Error("notes/target.md not found");
+            // Config shape used by other plugins before create_running_config existed
+            const content = await plugin.templater.parse_template(
+                { template_file: undefined, target_file, run_mode: 4 },
+                "Before <% tp.file.include('[[include-source]]') %>",
+            );
+            const functions_object = plugin.templater
+                .current_functions_object as { file?: { title?: unknown } };
+            return { content, title: functions_object.file?.title };
+        });
+        expect(result.content).toBe(
+            "---\nstatus: draft\n---\nBefore Included content",
+        );
+        // External scripts rely on this still being set after a run
+        expect(result.title).toBe("target");
+    });
+
     //#endregion
 
     //#region tp.file.creation_date
