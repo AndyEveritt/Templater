@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [2.25.1-a827cfaa](https://github.com/AndyEveritt/Templater/compare/2.25.1...2.25.1-a827cfaa) (2026-09-29)
+
+
+### Features
+
+* merge frontmatter when using `tp.file.include` ([285f187](https://github.com/AndyEveritt/Templater/commit/285f187e6f8ad024127f505e843f1eb7abaa5ff9)), closes [#1643](https://github.com/AndyEveritt/Templater/issues/1643) [#1696](https://github.com/AndyEveritt/Templater/issues/1696)
+
 ### [2.25.1](https://github.com/SilentVoid13/Templater/compare/2.25.0...2.25.1) (2026-09-19)
 
 
