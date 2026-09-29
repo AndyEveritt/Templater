@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+### [2.25.1-53895eee](https://github.com/AndyEveritt/Templater/compare/2.25.1-a827cfaa...2.25.1-53895eee) (2026-09-29)
+
+
+### Bug Fixes
+
+* scope included frontmatter to each include and keep template formatting ([a375e5f](https://github.com/AndyEveritt/Templater/commit/a375e5fb6d25bad8b50f812118ab1db4454be966))
+* tie included frontmatter to the template run that included it ([781e01b](https://github.com/AndyEveritt/Templater/commit/781e01be4a6e4fae4b45cfd077de4c6c958f223b))
+
 ### [2.25.1-a827cfaa](https://github.com/AndyEveritt/Templater/compare/2.25.1...2.25.1-a827cfaa) (2026-09-29)
 
 
