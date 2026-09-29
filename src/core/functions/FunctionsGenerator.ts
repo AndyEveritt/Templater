@@ -2,7 +2,7 @@ import { InternalFunctions } from "./internal_functions/InternalFunctions";
 import { UserFunctions } from "./user_functions/UserFunctions";
 import TemplaterPlugin from "main";
 import { IGenerateObject } from "./IGenerateObject";
-import { RunningConfig } from "core/Templater";
+import { FrontmatterCollector, RunningConfig } from "core/Templater";
 import * as obsidian_module from "obsidian";
 
 export enum FunctionsMode {
@@ -34,9 +34,14 @@ export class FunctionsGenerator implements IGenerateObject {
         };
     }
 
+    /**
+     * @param frontmatter_collector Where `tp.file.include` adds included
+     * frontmatter. Without one, frontmatter is left in the included content.
+     */
     async generate_object(
         config: RunningConfig,
-        functions_mode: FunctionsMode = FunctionsMode.USER_INTERNAL
+        functions_mode: FunctionsMode = FunctionsMode.USER_INTERNAL,
+        frontmatter_collector: FrontmatterCollector | null = null
     ): Promise<Record<string, unknown>> {
         const final_object = {};
         const additional_functions_object = this.additional_functions();
@@ -58,6 +63,10 @@ export class FunctionsGenerator implements IGenerateObject {
                 });
                 break;
         }
+        this.internal_functions.add_include(
+            final_object,
+            frontmatter_collector
+        );
 
         return final_object;
     }

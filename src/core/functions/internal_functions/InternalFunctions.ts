@@ -7,15 +7,17 @@ import { InternalModuleWeb } from "./web/InternalModuleWeb";
 import { InternalModuleHooks } from "./hooks/InternalModuleHooks";
 import { InternalModuleFrontmatter } from "./frontmatter/InternalModuleFrontmatter";
 import { InternalModuleSystem } from "./system/InternalModuleSystem";
-import { RunningConfig } from "core/Templater";
+import { FrontmatterCollector, RunningConfig } from "core/Templater";
 import { InternalModuleConfig } from "./config/InternalModuleConfig";
 
 export class InternalFunctions implements IGenerateObject {
     private modules_array: Array<InternalModule> = [];
+    private module_file: InternalModuleFile;
 
     constructor(protected plugin: TemplaterPlugin) {
+        this.module_file = new InternalModuleFile(this.plugin);
         this.modules_array.push(new InternalModuleDate(this.plugin));
-        this.modules_array.push(new InternalModuleFile(this.plugin));
+        this.modules_array.push(this.module_file);
         this.modules_array.push(new InternalModuleWeb(this.plugin));
         this.modules_array.push(new InternalModuleFrontmatter(this.plugin));
         this.modules_array.push(new InternalModuleHooks(this.plugin));
@@ -46,5 +48,12 @@ export class InternalFunctions implements IGenerateObject {
         }
 
         return internal_functions_object;
+    }
+
+    add_include(
+        functions_object: Record<string, unknown>,
+        frontmatter_collector: FrontmatterCollector | null
+    ): void {
+        this.module_file.add_include(functions_object, frontmatter_collector);
     }
 }

@@ -952,6 +952,233 @@ describe("InternalModuleFile", () => {
         expect(result.title).toBe("target");
     });
 
+    // Parses each template with `parse_template` concurrently, targeting
+    // notes/target.md and sharing one config
+    async function parseTemplates(templates: string[]): Promise<string[]> {
+        return browser.executeObsidian(async ({ app }, templates: string[]) => {
+            const plugin = app.plugins.getPlugin("templater-obsidian");
+            if (!plugin) throw new Error("templater-obsidian is not loaded");
+            const target_file = app.vault.getFileByPath("notes/target.md");
+            if (!target_file) throw new Error("notes/target.md not found");
+            const config = {
+                template_file: undefined,
+                target_file,
+                run_mode: 4,
+            };
+            return Promise.all(
+                templates.map((template) =>
+                    plugin.templater.parse_template(config, template),
+                ),
+            );
+        }, templates);
+    }
+
+    it("tp.file.include keeps frontmatter in content when merge_frontmatter is false", async () => {
+        await resetVault("test/vault", {
+            "notes/target.md": "\n",
+            "notes/include-source.md":
+                "---\nstatus: draft\n---\nIncluded content",
+        });
+        const [content] = await parseTemplates([
+            "---\ntitle: t\n---\n<% tp.file.include('[[include-source]]', false) %>",
+        ]);
+        expect(content).toBe(
+            "---\ntitle: t\n---\n---\nstatus: draft\n---\nIncluded content",
+        );
+    });
+
+    it("tp.file.include keeps included frontmatter separate for overlapping runs", async () => {
+        await resetVault("test/vault", {
+            "notes/target.md": "\n",
+            "notes/include-a.md": "---\na: true\n---\nA",
+            "notes/include-b.md": "---\nb: true\n---\nB",
+        });
+        const [a, b] = await parseTemplates([
+            "<%* await new Promise((r) => setTimeout(r, 200)) %>" +
+                "<% tp.file.include('[[include-a]]') %>",
+            "<% tp.file.include('[[include-b]]') %>",
+        ]);
+        expect(a).toBe("---\na: true\n---\nA");
+        expect(b).toBe("---\nb: true\n---\nB");
+    });
+
+    it("tp.file.include keeps template frontmatter formatting when adding new keys", async () => {
+        await resetVault("test/vault", {
+            "notes/target.md": "\n",
+            "notes/include-source.md":
+                "---\nstatus: draft\n---\nIncluded content",
+        });
+        const [content] = await parseTemplates([
+            '---\n# comment\ntags: [a, b]\ndate: "2024-01-01"\n---\n' +
+                "<% tp.file.include('[[include-source]]') %>",
+        ]);
+        expect(content).toBe(
+            '---\n# comment\ntags: [a, b]\ndate: "2024-01-01"\nstatus: draft\n---\nIncluded content',
+        );
+    });
+
+    it("tp.file.include does not add empty items when merging list properties with empty properties", async () => {
+        await resetVault("test/vault", {
+            "notes/target.md": "\n",
+            "notes/include-empty.md":
+                "---\ntags:\naliases:\n---\nIncluded content",
+            "notes/include-list.md":
+                "---\ntags:\n  - included\n---\nIncluded content",
+        });
+        const [list_with_empty, empty_with_list] = await parseTemplates([
+            "---\ntags:\n  - task\naliases:\n  - a\n---\n" +
+                "<% tp.file.include('[[include-empty]]') %>",
+            "---\ntags:\n---\n<% tp.file.include('[[include-list]]') %>",
+        ]);
+        expect(list_with_empty).toBe(
+            "---\ntags:\n  - task\naliases:\n  - a\n---\nIncluded content",
+        );
+        expect(empty_with_list).toBe(
+            "---\ntags:\n  - included\n---\nIncluded content",
+        );
+    });
+
+    it("tp.file.include keeps formatting of template frontmatter keys it doesn't change", async () => {
+        await resetVault("test/vault", {
+            "notes/target.md": "\n",
+            "notes/include-source.md": "---\ntags: [b]\n---\nIncluded content",
+        });
+        const [content] = await parseTemplates([
+            '---\n# comment\ntags: [a]\ndate: "2024-01-01"\n---\n' +
+                "<% tp.file.include('[[include-source]]') %>",
+        ]);
+        expect(content).toBe(
+            '---\n# comment\ntags:\n  - a\n  - b\ndate: "2024-01-01"\n---\nIncluded content',
+        );
+    });
+
+    it("tp.file.include rewrites flow style template frontmatter to add keys", async () => {
+        await resetVault("test/vault", {
+            "notes/target.md": "\n",
+            "notes/include-source.md":
+                "---\nstatus: draft\n---\nIncluded content",
+        });
+        const [content] = await parseTemplates([
+            "---\n{title: t}\n---\n<% tp.file.include('[[include-source]]') %>",
+        ]);
+        expect(content).toBe(
+            "---\ntitle: t\nstatus: draft\n---\nIncluded content",
+        );
+    });
+
+    it("tp.file.include only treats a frontmatter block at the start of the template as frontmatter", async () => {
+        await resetVault("test/vault", {
+            "notes/target.md": "\n",
+            "notes/include-source.md":
+                "---\nstatus: draft\n---\nIncluded content",
+        });
+        const [content] = await parseTemplates([
+            "<%* const x = 1 %>\n---\nNote: important\n---\n" +
+                "<% tp.file.include('[[include-source]]') %>",
+        ]);
+        expect(content).toBe(
+            "---\nstatus: draft\n---\n\n---\nNote: important\n---\nIncluded content",
+        );
+    });
+
+    it("tp.file.include gives nested included values precedence", async () => {
+        await resetVault("test/vault", {
+            "notes/target.md": "\n",
+            "notes/include-outer.md":
+                "---\nstatus: outer\n---\n<% tp.file.include('[[include-inner]]') %>",
+            "notes/include-inner.md": "---\nstatus: inner\n---\nInner",
+        });
+        const [content] = await parseTemplates([
+            "---\nstatus: template\n---\n<% tp.file.include('[[include-outer]]') %>",
+        ]);
+        expect(content).toBe("---\nstatus: inner\n---\nInner");
+    });
+
+    it("tp.file.include does not merge nested includes when merge_frontmatter is false", async () => {
+        await resetVault("test/vault", {
+            "notes/target.md": "\n",
+            "notes/include-outer.md":
+                "---\nouter: true\n---\nOuter <% tp.file.include('[[include-inner]]') %>",
+            "notes/include-inner.md": "---\ninner: true\n---\nInner",
+        });
+        const [content] = await parseTemplates([
+            "<% tp.file.include('[[include-outer]]', false) %>",
+        ]);
+        expect(content).toBe(
+            "---\nouter: true\n---\nOuter ---\ninner: true\n---\nInner",
+        );
+    });
+
+    it("tp.file.include called after its template has been parsed leaves frontmatter in content", async () => {
+        await resetVault("test/vault", {
+            "notes/target.md": "\n",
+            "notes/other.md": "\n",
+            "notes/include-source.md":
+                "---\nstatus: draft\n---\n<% tp.file.title %>",
+        });
+        const result = await browser.executeObsidian(async ({ app }) => {
+            const plugin = app.plugins.getPlugin("templater-obsidian");
+            if (!plugin) throw new Error("templater-obsidian is not loaded");
+            const target_file = app.vault.getFileByPath("notes/target.md");
+            const other_file = app.vault.getFileByPath("notes/other.md");
+            if (!target_file || !other_file) throw new Error("notes not found");
+            const w = window as unknown as {
+                templater_test_tp?: {
+                    file: { include: (link: string) => Promise<string> };
+                };
+                templater_test_resolve?: () => void;
+            };
+            await plugin.templater.parse_template(
+                { template_file: undefined, target_file, run_mode: 4 },
+                "<%* window.templater_test_tp = tp %>",
+            );
+            // Call the stored include while another run is being parsed
+            const other_run = plugin.templater.parse_template(
+                {
+                    template_file: undefined,
+                    target_file: other_file,
+                    run_mode: 4,
+                },
+                "<%* await new Promise((r) => (window.templater_test_resolve = r)) %>",
+            );
+            while (!w.templater_test_resolve) {
+                await new Promise((r) => setTimeout(r, 10));
+            }
+            const content =
+                await w.templater_test_tp?.file.include("[[include-source]]");
+            w.templater_test_resolve();
+            const other_content = await other_run;
+            delete w.templater_test_tp;
+            delete w.templater_test_resolve;
+            return { content, other_content };
+        });
+        expect(result.content).toBe("---\nstatus: draft\n---\ntarget");
+        expect(result.other_content).toBe("");
+    });
+
+    it("tp.file.include does not add a second frontmatter block when template frontmatter is invalid", async () => {
+        await resetVault("test/vault", {
+            "notes/target.md": "\n",
+            "notes/include-source.md":
+                "---\nstatus: draft\n---\nIncluded content",
+        });
+        const [content] = await parseTemplates([
+            "---\ntitle: Foo: bar\n---\n<% tp.file.include('[[include-source]]') %>",
+        ]);
+        expect(content).toBe("---\ntitle: Foo: bar\n---\nIncluded content");
+    });
+
+    it("tp.file.include leaves non-mapping frontmatter in the included content", async () => {
+        await resetVault("test/vault", {
+            "notes/target.md": "\n",
+            "notes/include-source.md": "---\n- a\n- b\n---\nIncluded content",
+        });
+        const [content] = await parseTemplates([
+            "<% tp.file.include('[[include-source]]') %>",
+        ]);
+        expect(content).toBe("---\n- a\n- b\n---\nIncluded content");
+    });
+
     //#endregion
 
     //#region tp.file.creation_date

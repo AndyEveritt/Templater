@@ -13,7 +13,12 @@ import {
 } from "obsidian";
 import { TemplaterError } from "utils/Error";
 import { ModuleName } from "editor/TpDocumentation";
-import { get_frontmatter_and_content, is_object } from "utils/Utils";
+import { FrontmatterCollector } from "core/Templater";
+import {
+    get_frontmatter_and_content,
+    is_object,
+    merge_objects,
+} from "utils/Utils";
 
 export const DEPTH_LIMIT = 10;
 
@@ -37,7 +42,6 @@ export class InternalModuleFile extends InternalModule {
         this.static_functions.set("exists", this.generate_exists());
         this.static_functions.set("find_tfile", this.generate_find_tfile());
         this.static_functions.set("folder", this.generate_folder());
-        this.static_functions.set("include", this.generate_include());
         this.static_functions.set(
             "last_modified_date",
             this.generate_last_modified_date()
@@ -55,6 +59,24 @@ export class InternalModuleFile extends InternalModule {
     }
 
     async teardown(): Promise<void> {}
+
+    /**
+     * Adds `tp.file.include` to a functions object, so included content is
+     * parsed with that object. Included frontmatter is added to
+     * `frontmatter_collector` while it's open.
+     */
+    add_include(
+        functions_object: Record<string, unknown>,
+        frontmatter_collector: FrontmatterCollector | null
+    ): void {
+        const file = functions_object[this.name];
+        if (is_object(file)) {
+            file.include = this.generate_include(
+                functions_object,
+                frontmatter_collector
+            );
+        }
+    }
 
     async generate_content(): Promise<string> {
         return await this.plugin.app.vault.read(this.config.target_file);
@@ -156,8 +178,17 @@ export class InternalModuleFile extends InternalModule {
         };
     }
 
-    generate_include(): (include_link: string | TFile) => Promise<string> {
-        return async (include_link: string | TFile) => {
+    generate_include(
+        functions_object: Record<string, unknown>,
+        frontmatter_collector: FrontmatterCollector | null
+    ): (
+        include_link: string | TFile,
+        merge_frontmatter?: boolean
+    ) => Promise<string> {
+        return async (
+            include_link: string | TFile,
+            merge_frontmatter = true
+        ) => {
             // TODO: Add mutex for this, this may currently lead to a race condition.
             // While not very impactful, that could still be annoying.
             this.include_depth += 1;
@@ -214,26 +245,51 @@ export class InternalModuleFile extends InternalModule {
                 }
             }
 
+            // Nested includes collect into their own collector, so they can
+            // be merged into this file's frontmatter first
+            const collector: FrontmatterCollector | null =
+                frontmatter_collector?.open && merge_frontmatter
+                    ? { frontmatter: {}, open: true }
+                    : null;
+            const nested_functions_object = {
+                ...functions_object,
+                [this.name]: { ...(functions_object[this.name] as object) },
+            };
+            this.add_include(nested_functions_object, collector);
+
             try {
-                const parsed_content =
-                    await this.plugin.templater.parser.parse_commands(
-                        inc_file_content,
-                        this.plugin.templater.current_functions_object
-                    );
+                let parsed_content: string;
+                try {
+                    parsed_content =
+                        await this.plugin.templater.parser.parse_commands(
+                            inc_file_content,
+                            nested_functions_object
+                        );
+                } finally {
+                    if (collector) collector.open = false;
+                }
                 this.include_depth -= 1;
+                if (!collector || !frontmatter_collector?.open) {
+                    return parsed_content;
+                }
                 if (is_whole_file) {
-                    const { frontmatter, content } =
+                    const { frontmatter, content, yaml } =
                         get_frontmatter_and_content(parsed_content);
-                    if (
-                        is_object(frontmatter) &&
-                        Object.keys(frontmatter).length > 0 &&
-                        this.plugin.templater.collect_included_frontmatter(
-                            frontmatter,
-                        )
-                    ) {
+                    if (yaml !== undefined) {
+                        // Included values take precedence, as they do over
+                        // the template
+                        merge_objects(frontmatter, collector.frontmatter);
+                        merge_objects(
+                            frontmatter_collector.frontmatter,
+                            frontmatter
+                        );
                         return content;
                     }
                 }
+                merge_objects(
+                    frontmatter_collector.frontmatter,
+                    collector.frontmatter
+                );
                 return parsed_content;
             } catch (e) {
                 this.include_depth -= 1;

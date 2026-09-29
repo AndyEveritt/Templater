@@ -15,6 +15,7 @@ import {
     getFrontMatterInfo,
     normalizePath,
     parseYaml,
+    stringifyYaml,
     TAbstractFile,
     TFile,
     TFolder,
@@ -218,6 +219,10 @@ export function is_object(obj: unknown): obj is Record<string, unknown> {
     return obj !== null && typeof obj === "object";
 }
 
+export function is_plain_object(obj: unknown): obj is Record<string, unknown> {
+    return is_object(obj) && !Array.isArray(obj);
+}
+
 export function get_fn_params(func: (...args: unknown[]) => unknown) {
     const str = func.toString();
     const len = str.indexOf("(");
@@ -251,6 +256,16 @@ export function append_bolded_label_with_value_to_parent(
     return para;
 }
 
+// Empty values, e.g. a property without a value, don't replace or add to others
+function is_empty(value: unknown): boolean {
+    return value === undefined || value === null || value === "";
+}
+
+function to_array(value: unknown): unknown[] {
+    if (Array.isArray(value)) return value;
+    return is_empty(value) ? [] : [value];
+}
+
 /**
  * Merges two objects recursively. Target object will be modified.
  * @param target The target object to merge into.
@@ -267,22 +282,12 @@ export function merge_objects(
                 const targetValue = target[key];
                 const sourceValue = source[key];
                 if (Array.isArray(targetValue) || Array.isArray(sourceValue)) {
-                    const targetValueArray = Array.isArray(targetValue)
-                        ? targetValue
-                        : [targetValue];
-                    const sourceValueArray = Array.isArray(sourceValue)
-                        ? sourceValue
-                        : [sourceValue];
-                    target[key] = targetValueArray
-                        .concat(sourceValueArray)
+                    target[key] = to_array(targetValue)
+                        .concat(to_array(sourceValue))
                         .unique();
                 } else if (is_object(targetValue) && is_object(sourceValue)) {
                     merge_objects(targetValue, sourceValue);
-                } else if (
-                    sourceValue !== undefined &&
-                    sourceValue !== null &&
-                    sourceValue !== ""
-                ) {
+                } else if (!is_empty(sourceValue)) {
                     target[key] = sourceValue;
                 }
             } else {
@@ -292,22 +297,118 @@ export function merge_objects(
     }
 }
 
-export function get_frontmatter_and_content(content: string) {
-    let frontmatter: Record<string, unknown> = {};
+export function get_frontmatter_and_content(content: string): {
+    frontmatter: Record<string, unknown>;
+    content: string;
+    // YAML of the frontmatter block, undefined if there's no valid frontmatter
+    yaml?: string;
+    // Whether there's a frontmatter block that isn't a valid YAML mapping
+    invalid: boolean;
+} {
     const front_matter_info = getFrontMatterInfo(content);
-    if (front_matter_info.frontmatter) {
-        try {
-            frontmatter = parseYaml(front_matter_info.frontmatter) as Record<
-                string,
-                unknown
-            >;
-        } catch {
-            // Invalid YAML — preserve full content as body with no frontmatter merging
-            return { frontmatter, content };
-        }
+    if (!front_matter_info.exists) {
+        return { frontmatter: {}, content, invalid: false };
+    }
+    let frontmatter: unknown;
+    try {
+        // Empty or comment only frontmatter parses to null
+        frontmatter = parseYaml(front_matter_info.frontmatter) ?? {};
+    } catch {
+        frontmatter = undefined;
+    }
+    if (!is_plain_object(frontmatter)) {
+        // Invalid YAML — preserve full content as body with no frontmatter merging
+        return { frontmatter: {}, content, invalid: true };
     }
     return {
         frontmatter,
         content: content.slice(front_matter_info.contentStart),
+        yaml: front_matter_info.frontmatter,
+        invalid: false,
     };
+}
+
+/**
+ * Merges `source` into frontmatter and returns its new YAML. Only the top
+ * level keys that change are rewritten, so the rest keeps its formatting and
+ * comments. All of it is rewritten if it can't be edited that way.
+ * @param yaml The frontmatter's YAML.
+ * @param frontmatter The parsed `yaml`. Will be modified.
+ * @param source The frontmatter to merge from, taking precedence.
+ */
+export function merge_frontmatter_yaml(
+    yaml: string,
+    frontmatter: Record<string, unknown>,
+    source: Record<string, unknown>,
+): string {
+    const previous = new Map(
+        Object.entries(frontmatter).map(([key, value]) => [
+            key,
+            JSON.stringify(value),
+        ]),
+    );
+    merge_objects(frontmatter, source);
+    const changed_keys = new Set<string>();
+    const added: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(frontmatter)) {
+        if (!previous.has(key)) {
+            added[key] = value;
+        } else if (previous.get(key) !== JSON.stringify(value)) {
+            changed_keys.add(key);
+        }
+    }
+
+    // Split the YAML into top level entries, each a key with its indented or
+    // list item lines, and replace the entries of changed keys
+    const lines = yaml.split("\n");
+    if (lines[lines.length - 1] === "") lines.pop();
+    const output: string[] = [];
+    let i = 0;
+    while (i < lines.length) {
+        let end = i + 1;
+        let key: string | undefined;
+        if (/^[^\s#-]/.test(lines[i])) {
+            while (end < lines.length && /^(\s|-(\s|$)|$)/.test(lines[end])) {
+                end++;
+            }
+            key = get_yaml_entry_key(lines.slice(i, end).join("\n"));
+        }
+        if (key !== undefined && changed_keys.has(key)) {
+            output.push(stringifyYaml({ [key]: frontmatter[key] }).trimEnd());
+        } else {
+            output.push(...lines.slice(i, end));
+        }
+        i = end;
+    }
+    if (Object.keys(added).length > 0) {
+        output.push(stringifyYaml(added).trimEnd());
+    }
+    const result = output.length > 0 ? `${output.join("\n")}\n` : "";
+
+    // Only use the edited YAML if it's exactly the merged frontmatter, e.g.
+    // flow style YAML can't have keys appended
+    try {
+        if (
+            JSON.stringify(parseYaml(result) ?? {}) ===
+            JSON.stringify(frontmatter)
+        ) {
+            return result;
+        }
+    } catch {
+        // Fall back to rewriting all of it
+    }
+    return stringifyYaml(frontmatter);
+}
+
+function get_yaml_entry_key(entry: string): string | undefined {
+    try {
+        const parsed: unknown = parseYaml(entry);
+        if (is_plain_object(parsed)) {
+            const keys = Object.keys(parsed);
+            if (keys.length === 1) return keys[0];
+        }
+    } catch {
+        // Not a single entry on its own, e.g. it uses an alias
+    }
+    return undefined;
 }
